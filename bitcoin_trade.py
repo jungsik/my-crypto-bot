@@ -5,45 +5,48 @@ import os
 import requests
 
 # 1. API 키 및 텔레그램 설정 (환경변수 연동)
-ACCESS_KEY = os.environ.get('UPBIT_ACCESS_KEY', "본인의_ACCESS_KEY_입력")
-SECRET_KEY = os.environ.get('UPBIT_SECRET_KEY', "본인의_SECRET_KEY_입력")
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', "본인의_TELEGRAM_TOKEN_입력")
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', "본인의_CHAT_ID_입력")
+ACCESS_KEY = os.environ.get('UPBIT_ACCESS_KEY', "본인의_ACCESS_KEY_입력").strip()
+SECRET_KEY = os.environ.get('UPBIT_SECRET_KEY', "본인의_SECRET_KEY_입력").strip()
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', "본인의_TELEGRAM_TOKEN_입력").strip()
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', "본인의_CHAT_ID_입력").strip()
 
-# 업비트 주문 전용 객체 생성 (자산조회, 주문 권한만 사용)
+# 업비트 주문 전용 객체 생성
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
-# 분산 매매 대상 코인 리스트
 TARGET_COINS = ["KRW-BTC", "KRW-ETH"]
 
-# 종목별 상태 관리를 위한 딕셔너리 초기화
 buy_prices = {coin: 0 for coin in TARGET_COINS}
 is_target_achieved = {coin: False for coin in TARGET_COINS}
 today_profit_targets = {coin: 0.01 for coin in TARGET_COINS}
 today_k_values = {coin: 0.5 for coin in TARGET_COINS}
 
 def send_telegram_msg(message):
-    """텔레그램 메시지 전송 함수"""
+    """💡 텔레그램 주소 파싱 오류를 원천 차단한 안전 발송 함수"""
     try:
-        url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-        requests.post(url, json=payload)
+        # 토큰 값 앞뒤에 붙은 불필요한 주소나 공백을 완전히 청소
+        clean_token = TELEGRAM_TOKEN.replace("https://telegram.org", "").strip()
+        url = f"https://telegram.org{clean_token}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID.strip(), "text": message}
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"텔레그램 발송 실패: {e}")
+        print(f"텔레그램 발송 예외 발생: {e}")
 
 def get_current_price_via_api(ticker):
-    """
-    💡 [사용자 제안 반영] requests 기반의 순수 HTTP 시세 조회 함수
-    업비트 로그인 권한이나 세션 끊김 현상 없이 가장 빠르고 안전하게 현재가를 가져옵니다.
-    """
+    """💡 응답 데이터 타입 검증 로직이 보완된 현재가 조회 함수"""
     try:
-        url = f"https://api.upbit.com/v1/ticker?markets={ticker}"
+        url = f"https://upbit.com{ticker}"
         headers = {"Accept": "application/json"}
-        response = requests.get(url, headers=headers)
-        # 응답 배열에서 첫 번째 항목의 'trade_price'(현재 체결가)를 추출하여 반환 [1]
-        return float(response.json()[0]['trade_price'])
+        response = requests.get(url, headers=headers, timeout=10)
+        data = response.json()
+        
+        # 데이터가 정상적인 리스트 구조인지 검증 (string indices must be integers 버그 차단)
+        if isinstance(data, list) and len(data) > 0 and 'trade_price' in data[0]:
+            return float(data[0]['trade_price'])
+        else:
+            print(f"[{ticker}] API 응답 형식이 올바르지 않음. 라이브러리로 대체 구동.")
+            return pyupbit.get_current_price(ticker)
     except Exception as e:
-        print(f"{ticker} requests 현재가 조회 실패, 라이브러리로 대체: {e}")
+        print(f"{ticker} 현재가 조회 실패, 라이브러리로 대체: {e}")
         return pyupbit.get_current_price(ticker)
 
 def check_market_condition_and_set_policy(ticker):
@@ -57,19 +60,14 @@ def check_market_condition_and_set_policy(ticker):
         yesterday_return_pct = ((yesterday_close - yesterday_open) / yesterday_open) * 100
         coin_name = ticker.split("-")[-1]
         
-        # 🔥 Case 1: 전날 +10% 이상 대폭등 (불장 모드)
         if yesterday_return_pct >= 10.0:
             today_profit_targets[ticker] = 0.05
             today_k_values[ticker] = 0.5
             msg = f"🔥 [{coin_name} 불장 모드] 전날 {yesterday_return_pct:.1f}% 폭등!\n🎯 오늘 목표 수익률을 [5%]로 상향합니다. (K: 0.5)"
-        
-        # 🛡️ Case 2: 전날 -5% 이하 대폭락 (방어 모드)
         elif yesterday_return_pct <= -5.0:
             today_profit_targets[ticker] = 0.01
             today_k_values[ticker] = 0.7
             msg = f"❄️ [{coin_name} 방어 모드] 전날 {yesterday_return_pct:.1f}% 폭락..\n⚠️ 가짜 반등 방지를 위해 매수 진입 K값을 [0.7]로 높입니다. (목표: 1%)"
-            
-        # ⚖️ Case 3: 평시 상태 (안정 모드)
         else:
             today_profit_targets[ticker] = 0.01
             today_k_values[ticker] = 0.5
@@ -97,25 +95,36 @@ def get_target_and_support(ticker, k):
 def get_start_time(ticker):
     """시작 시간 조회"""
     df = pyupbit.get_ohlcv(ticker, interval="day", count=1)
-    return df.index[0]
+    return df.index
 
 def get_balance(ticker):
-    """잔고 조회"""
-    balances = upbit.get_balances()
-    for b in balances:
-        if b['currency'] == ticker:
-            return float(b['balance']) if b['balance'] is not None else 0
-    return 0
+    """💡 API 키 오류로 문자열 응답이 와도 튕기지 않도록 예외 처리 보완"""
+    try:
+        balances = upbit.get_balances()
+        if isinstance(balances, list):
+            for b in balances:
+                if isinstance(b, dict) and b.get('currency') == ticker:
+                    return float(b['balance']) if b.get('balance') is not None else 0
+        else:
+            print("⚠️ 업비트 API 연결 실패: API Key 및 권한 설정을 점검하세요.")
+        return 0
+    except Exception as e:
+        print(f"잔고 조회 오류: {e}")
+        return 0
 
 def get_avg_buy_price(ticker):
     """실제 보유 중인 코인의 평단가 조회"""
-    balances = upbit.get_balances()
-    for b in balances:
-        if b['currency'] == ticker:
-            return float(b['avg_buy_price']) if b['avg_buy_price'] is not None else 0
-    return 0
+    try:
+        balances = upbit.get_balances()
+        if isinstance(balances, list):
+            for b in balances:
+                if isinstance(b, dict) and b.get('currency') == ticker:
+                    return float(b['avg_buy_price']) if b.get('avg_buy_price'] is not None else 0
+        return 0
+    except Exception as e:
+        return 0
 
-# 프로그램 기동 시 모든 대상 코인의 최초 시장 평가 실행
+# 프로그램 기동 시 최초 평가 실행
 for coin in TARGET_COINS:
     check_market_condition_and_set_policy(coin)
 
@@ -129,7 +138,6 @@ while True:
         start_time = get_start_time("KRW-BTC") 
         end_time = start_time + datetime.timedelta(days=1) 
 
-        # 🕒 매일 아침 9시 정각 상태 리셋 및 당일 맞춤형 모드 갱신
         if start_time <= now < start_time + datetime.timedelta(seconds=5):
             for coin in TARGET_COINS:
                 is_target_achieved[coin] = False
@@ -137,26 +145,20 @@ while True:
                 check_market_condition_and_set_policy(coin) 
             time.sleep(5) 
 
-        # 장중 매매 구간 (아침 9시 00분 05초 ~ 다음날 아침 8시 59분 50초)
         if start_time < now < end_time - datetime.timedelta(seconds=10):
-            
             for coin in TARGET_COINS:
-                currency_code = coin.split("-")[-1] # BTC 또는 ETH
+                currency_code = coin.split("-")[-1]
                 coin_balance = get_balance(currency_code)
-                
-                # 💡 새로 추가된 requests 기반 현재가 실시간 동기화
                 current_price = get_current_price_via_api(coin)
                 
                 target_price, today_open, prev_low_line = get_target_and_support(coin, k=today_k_values[coin])
                 
-                # [상태 1] 해당 코인을 보유 중인 경우 -> 실시간 익절/3중 손절 감시
                 if coin_balance > 0.00001:
                     if buy_prices[coin] == 0:
                         buy_prices[coin] = get_avg_buy_price(currency_code)
                     
                     sell_trigger_price = buy_prices[coin] * (1.0 + today_profit_targets[coin] + 0.001)
                     
-                    # 📈 가변 익절 달성
                     if current_price >= sell_trigger_price:
                         upbit.sell_market_order(coin, coin_balance)
                         msg = f"🎉 [{currency_code} 익절 완료] 목표 {today_profit_targets[coin]*100}% 수익 실현!\n· 평단가: {buy_prices[coin]:,.0f}원\n· 매도전송: {current_price:,.0f}원"
@@ -164,7 +166,6 @@ while True:
                         is_target_achieved[coin] = True 
                         buy_prices[coin] = 0
                     
-                    # 📉 [손절 1] 고정 비율 손절 (-2%)
                     elif current_price <= buy_prices[coin] * 0.979:
                         upbit.sell_market_order(coin, coin_balance)
                         msg = f"🚨 [{currency_code} 고정손절] 무조건 손절 매도 (-2%)\n· 평단가: {buy_prices[coin]:,.0f}원\n· 매도전송: {current_price:,.0f}원"
@@ -172,7 +173,6 @@ while True:
                         is_target_achieved[coin] = True
                         buy_prices[coin] = 0
                         
-                    # 📉 [손절 2] 당일 시가 이탈 손절
                     elif current_price < today_open:
                         upbit.sell_market_order(coin, coin_balance)
                         msg = f"🚨 [{currency_code} 시가손절] 당일 시가선 붕괴 이탈 매도\n· 시가기준: {today_open:,.0f}원\n· 매도전송: {current_price:,.0f}원"
@@ -180,7 +180,6 @@ while True:
                         is_target_achieved[coin] = True
                         buy_prices[coin] = 0
                         
-                    # 📉 [손절 3] 전저점 이탈 손절
                     elif current_price < prev_low_line:
                         upbit.sell_market_order(coin, coin_balance)
                         msg = f"🚨 [{currency_code} 저점손절] 어제 지지 바닥선 붕괴 매도\n· 저점기준: {prev_low_line:,.0f}원\n· 매도전송: {current_price:,.0f}원"
@@ -188,12 +187,9 @@ while True:
                         is_target_achieved[coin] = True
                         buy_prices[coin] = 0
                 
-                # [상태 2] 코인이 없고, 오늘 매매 성공 기록이 없다면 -> 매수 감시
                 elif not is_target_achieved[coin]:
                     if target_price < current_price:
                         krw = get_balance("KRW")
-                        
-                        # 균등 분할 투자 (2만원 자본금 기준 종목당 1만원 타깃 설정)
                         buy_amount = 10000 if krw >= 10000 else krw
                         
                         if buy_amount > 5000:
@@ -203,7 +199,6 @@ while True:
                             msg = f"🛒 [{currency_code} 매수 완료] 변동성 돌파 성공!\n· 진입평단: {buy_prices[coin]:,.0f}원\n· 오늘목표: {today_profit_targets[coin]*100}%"
                             send_telegram_msg(msg)
                     
-        # 당일 마감 청산 타임 (다음 날 아침 8시 59분 50초)
         else:
             for coin in TARGET_COINS:
                 currency_code = coin.split("-")[-1]
