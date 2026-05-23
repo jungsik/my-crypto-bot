@@ -5,10 +5,10 @@ import os
 import requests
 
 # 1. API 키 및 텔레그램 설정 (환경변수 연동)
-ACCESS_KEY = os.environ.get('UPBIT_ACCESS_KEY', "0wzXAqFYlXqjQZNDh2eBzNzyQDG34N56dWcb4xWM")
-SECRET_KEY = os.environ.get('UPBIT_SECRET_KEY', "PVYpPG7mpInfv3M7neWzvpRb7yovAAFdPDiczF9O")
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', "8440478958:AAE3yyEJba12EymtGY0W-pN2QzjjqGDto6U")
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', "6766226947")
+ACCESS_KEY = os.environ.get('UPBIT_ACCESS_KEY', "본인의_ACCESS_KEY_입력")
+SECRET_KEY = os.environ.get('UPBIT_SECRET_KEY', "본인의_SECRET_KEY_입력")
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', "본인의_TELEGRAM_TOKEN_입력")
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', "본인의_CHAT_ID_입력")
 
 # 업비트 주문 전용 객체 생성 (자산조회, 주문 권한만 사용)
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
