@@ -266,6 +266,27 @@ def print_market_log(currency, current_price, market, signal):
     )
 
 
+def format_bool(value):
+    return "OK" if value else "NO"
+
+
+def build_status_line(currency, current_price, market, signal, holding, profit_rate):
+    holding_text = "HOLD" if holding else "NONE"
+    profit_text = f"{profit_rate * 100:.2f}%" if holding else "-"
+
+    return (
+        f"{currency} {market['mode']} {holding_text}\n"
+        f"price {current_price:,.0f} / target {market['target_price']:,.0f}\n"
+        f"MA {market['ma5']:,.0f}>{market['ma10']:,.0f}>{market['ma20']:,.0f} "
+        f"({format_bool(signal['uptrend'])}) / RSI {market['rsi']:.1f} "
+        f"({format_bool(signal['rsi_ok'])})\n"
+        f"VOL {market['today_volume']:.0f}/{market['avg_volume5']:.0f} "
+        f"({format_bool(signal['volume_ok'])}) / breakout "
+        f"{format_bool(signal['breakout'])} / chase {format_bool(signal['chase_ok'])}\n"
+        f"buy_signal {format_bool(signal['result'])} / profit {profit_text}"
+    )
+
+
 def main():
     if not ACCESS_KEY or not SECRET_KEY:
         raise RuntimeError("Set UPBIT_ACCESS_KEY and UPBIT_SECRET_KEY in GitHub Secrets.")
@@ -279,6 +300,7 @@ def main():
         send_telegram_msg("Daily strategy reset completed")
 
     balances = get_balances()
+    status_lines = []
 
     for ticker in TARGET_COINS:
         currency = ticker.split("-")[-1]
@@ -293,8 +315,24 @@ def main():
 
         coin_balance = get_balance(balances, currency)
         avg_buy_price = get_avg_buy_price(balances, currency)
+        holding = coin_balance > 0.00001
+        profit_rate = 0
 
-        if coin_balance > 0.00001:
+        if holding and avg_buy_price > 0:
+            profit_rate = (current_price - avg_buy_price) / avg_buy_price
+
+        status_lines.append(
+            build_status_line(
+                currency,
+                current_price,
+                market,
+                signal,
+                holding,
+                profit_rate,
+            )
+        )
+
+        if holding:
             sell_reason, profit_rate = get_sell_reason(
                 current_price,
                 avg_buy_price,
@@ -335,6 +373,13 @@ def main():
                 f"RSI: {market['rsi']:.1f}\n"
                 f"volume: {market['today_volume']:.0f} / avg5 {market['avg_volume5']:.0f}"
             )
+
+    if status_lines:
+        report = (
+            f"Bot status {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            + "\n\n".join(status_lines)
+        )
+        send_telegram_msg(report)
 
     save_state(state)
 
