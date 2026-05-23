@@ -33,6 +33,7 @@ STOP_LOSS = -0.02
 
 FEE_RATE = 0.0005
 STATE_FILE = Path("bot_state.json")
+STRATEGY_CONFIG_FILE = Path("strategy_config.json")
 
 RSI_MIN = 50
 RSI_MAX = 75
@@ -41,6 +42,32 @@ MAX_CHASE_RATE = 0.01
 
 
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
+
+
+def load_strategy_config():
+    global RSI_MIN, RSI_MAX, VOLUME_MULTIPLIER, MAX_CHASE_RATE
+
+    if not STRATEGY_CONFIG_FILE.exists():
+        print("[CONFIG] strategy_config.json not found. Use default values.")
+        return
+
+    try:
+        config = json.loads(STRATEGY_CONFIG_FILE.read_text(encoding="utf-8"))
+        RSI_MIN = int(config.get("RSI_MIN", RSI_MIN))
+        RSI_MAX = int(config.get("RSI_MAX", RSI_MAX))
+        VOLUME_MULTIPLIER = float(
+            config.get("VOLUME_MULTIPLIER", VOLUME_MULTIPLIER)
+        )
+        MAX_CHASE_RATE = float(config.get("MAX_CHASE_RATE", MAX_CHASE_RATE))
+
+        print(
+            "[CONFIG] loaded "
+            f"RSI={RSI_MIN}~{RSI_MAX}, "
+            f"VOLx={VOLUME_MULTIPLIER}, "
+            f"CHASE={MAX_CHASE_RATE}"
+        )
+    except Exception as e:
+        print("[CONFIG LOAD ERROR]", e)
 
 
 def send_telegram_msg(message):
@@ -290,6 +317,8 @@ def build_status_line(currency, current_price, market, signal, holding, profit_r
 def main():
     if not ACCESS_KEY or not SECRET_KEY:
         raise RuntimeError("Set UPBIT_ACCESS_KEY and UPBIT_SECRET_KEY in GitHub Secrets.")
+
+    load_strategy_config()
 
     now = datetime.datetime.now()
     today = now.date().isoformat()
