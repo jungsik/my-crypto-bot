@@ -1,0 +1,30 @@
+name: Upbit Auto Trade
+
+on:
+  schedule:
+    # 💡 5분마다 가상 컴퓨터가 자동으로 켜져서 시세를 감시하도록 정밀 세팅
+    - cron: '*/5 * * * *'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 저장소 코드 가져오기
+      uses: actions/checkout@v3
+
+    - name: 가상환경 파이썬 설치
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: 필수 라이브러리 설치
+      run: |
+        pip install pyupbit requests
+
+    - name: 2종 분산 가변 자동매매 가동
+      env:
+        UPBIT_ACCESS_KEY: ${{ secrets.UPBIT_ACCESS_KEY }}
+        UPBIT_SECRET_KEY: ${{ secrets.UPBIT_SECRET_KEY }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python bitcoin_trade.py
