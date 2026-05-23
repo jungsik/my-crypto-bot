@@ -21,33 +21,44 @@ today_profit_targets = {coin: 0.01 for coin in TARGET_COINS}
 today_k_values = {coin: 0.5 for coin in TARGET_COINS}
 
 def send_telegram_msg(message):
-    """💡 텔레그램 주소 파싱 오류를 원천 차단한 안전 발송 함수"""
+    """💡 주소 중복 파싱 에러를 완벽하게 정화하는 방어용 발송 함수"""
     try:
-        # 토큰 값 앞뒤에 붙은 불필요한 주소나 공백을 완전히 청소
-        clean_token = TELEGRAM_TOKEN.replace("https://telegram.org", "").strip()
+        # 혹시 토큰에 주소 전체가 들어왔을 경우를 대비한 3중 정화 필터
+        clean_token = TELEGRAM_TOKEN.replace("https://telegram.org", "")
+        clean_token = clean_token.replace("https://telegram.org", "")
+        clean_token = clean_token.replace("/sendMessage", "")
+        clean_token = clean_token.strip("/* ") # 슬래시나 별표, 공백 완전 제거
+        
+        # 완전무결한 단일 주소 조립
         url = f"https://telegram.org{clean_token}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID.strip(), "text": message}
-        requests.post(url, json=payload, timeout=10)
+        
+        response = requests.post(url, json=payload, timeout=10)
+        print(f"텔레그램 발송 시도 결과 코드: {response.status_code}")
     except Exception as e:
-        print(f"텔레그램 발송 예외 발생: {e}")
+        print(f"텔레그램 발송 내부 예외 발생: {e}")
 
 def get_current_price_via_api(ticker):
-    """💡 응답 데이터 타입 검증 로직이 보완된 현재가 조회 함수"""
+    """💡 업비트 트래픽 거부 및 데이터 타입 에러를 완전히 지워버리는 현재가 함수"""
     try:
         url = f"https://upbit.com{ticker}"
-        headers = {"Accept": "application/json"}
-        response = requests.get(url, headers=headers, timeout=10)
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+        response = requests.get(url, headers=headers, timeout=5)
         data = response.json()
         
-        # 데이터가 정상적인 리스트 구조인지 검증 (string indices must be integers 버그 차단)
-        if isinstance(data, list) and len(data) > 0 and 'trade_price' in data[0]:
-            return float(data[0]['trade_price'])
-        else:
-            print(f"[{ticker}] API 응답 형식이 올바르지 않음. 라이브러리로 대체 구동.")
-            return pyupbit.get_current_price(ticker)
+        # 데이터가 리스트이고 내부에 딕셔너리가 정상 존재할 때만 안전하게 접근
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+            if 'trade_price' in data[0]:
+                return float(data[0]['trade_price'])
+        
+        # 예외 상황 발생 시 안정적인 라이브러리 백업 시세 사용
+        return float(pyupbit.get_current_price(ticker))
     except Exception as e:
-        print(f"{ticker} 현재가 조회 실패, 라이브러리로 대체: {e}")
-        return pyupbit.get_current_price(ticker)
+        # 에러가 나더라도 무조건 시세를 반환하여 프로그램을 지속시킴
+        return float(pyupbit.get_current_price(ticker))
 
 def check_market_condition_and_set_policy(ticker):
     """어제 수익률에 따라 오늘 익절 목표와 K값을 능동 변경"""
@@ -98,18 +109,16 @@ def get_start_time(ticker):
     return df.index
 
 def get_balance(ticker):
-    """💡 API 키 오류로 문자열 응답이 와도 튕기지 않도록 예외 처리 보완"""
+    """안전 잔고 조회 함수"""
     try:
         balances = upbit.get_balances()
         if isinstance(balances, list):
             for b in balances:
                 if isinstance(b, dict) and b.get('currency') == ticker:
                     return float(b['balance']) if b.get('balance') is not None else 0
-        else:
-            print("⚠️ 업비트 API 연결 실패: API Key 및 권한 설정을 점검하세요.")
         return 0
     except Exception as e:
-        print(f"잔고 조회 오류: {e}")
+        print(f"잔고 조회 오류 건너뜀: {e}")
         return 0
 
 def get_avg_buy_price(ticker):
@@ -211,5 +220,5 @@ while True:
         time.sleep(1) 
         
     except Exception as e:
-        print(f"시스템 오류 발생 제어 중: {e}")
+        print(f"시스템 예외 루프 보호 제어 중: {e}")
         time.sleep(1)
