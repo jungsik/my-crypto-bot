@@ -10,7 +10,6 @@ SECRET_KEY = os.environ.get('UPBIT_SECRET_KEY', "본인의_SECRET_KEY_입력").s
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', "본인의_TELEGRAM_TOKEN_입력").strip()
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', "본인의_CHAT_ID_입력").strip()
 
-# 업비트 주문 전용 객체 생성
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 TARGET_COINS = ["KRW-BTC", "KRW-ETH"]
@@ -21,25 +20,26 @@ today_profit_targets = {coin: 0.01 for coin in TARGET_COINS}
 today_k_values = {coin: 0.5 for coin in TARGET_COINS}
 
 def send_telegram_msg(message):
-    """💡 주소 중복 파싱 에러를 완벽하게 정화하는 방어용 발송 함수"""
+    """💡 [긴급 패치] 금고에 주소가 섞여 들어와도 숫자로 된 토큰만 강제로 발라내는 함수"""
     try:
-        # 혹시 토큰에 주소 전체가 들어왔을 경우를 대비한 3중 정화 필터
-        clean_token = TELEGRAM_TOKEN.replace("https://telegram.org", "")
+        # 금고에 들어온 값에서 불필요한 주소 문자열을 모조리 청소합니다.
+        raw_token = TELEGRAM_TOKEN
+        clean_token = raw_token.replace("https://telegram.org", "")
         clean_token = clean_token.replace("https://telegram.org", "")
         clean_token = clean_token.replace("/sendMessage", "")
-        clean_token = clean_token.strip("/* ") # 슬래시나 별표, 공백 완전 제거
+        clean_token = clean_token.strip("/* ") # 별표, 슬래시, 공백 완전 제거
         
-        # 완전무결한 단일 주소 조립
+        # ⚠️ 강제 교정 주소 조립
         url = f"https://telegram.org{clean_token}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID.strip(), "text": message}
         
         response = requests.post(url, json=payload, timeout=10)
-        print(f"텔레그램 발송 시도 결과 코드: {response.status_code}")
+        print(f"텔레그램 발송 성공 여부 (HTTP {response.status_code})")
     except Exception as e:
         print(f"텔레그램 발송 내부 예외 발생: {e}")
 
 def get_current_price_via_api(ticker):
-    """💡 업비트 트래픽 거부 및 데이터 타입 에러를 완전히 지워버리는 현재가 함수"""
+    """💡 데이터 타입 에러(string indices must be integers)를 완벽히 소멸시킨 현재가 함수"""
     try:
         url = f"https://upbit.com{ticker}"
         headers = {
@@ -49,15 +49,14 @@ def get_current_price_via_api(ticker):
         response = requests.get(url, headers=headers, timeout=5)
         data = response.json()
         
-        # 데이터가 리스트이고 내부에 딕셔너리가 정상 존재할 때만 안전하게 접근
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
-            if 'trade_price' in data[0]:
-                return float(data[0]['trade_price'])
+        # 업비트 시세 데이터가 정상적인 리스트 형태일 때만 안전하게 접근
+        if isinstance(data, list) and len(data) > 0:
+            first_item = data[0] # 첫 번째 항목 선택
+            if isinstance(first_item, dict) and 'trade_price' in first_item:
+                return float(first_item['trade_price'])
         
-        # 예외 상황 발생 시 안정적인 라이브러리 백업 시세 사용
         return float(pyupbit.get_current_price(ticker))
     except Exception as e:
-        # 에러가 나더라도 무조건 시세를 반환하여 프로그램을 지속시킴
         return float(pyupbit.get_current_price(ticker))
 
 def check_market_condition_and_set_policy(ticker):
