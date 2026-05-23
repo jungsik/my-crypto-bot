@@ -1,0 +1,12 @@
+{
+  "RSI_MIN": 50,
+  "RSI_MAX": 75,
+  "VOLUME_MULTIPLIER": 1.2,
+  "MAX_CHASE_RATE": 0.01,
+  "optimized_at": "manual-default",
+  "tickers": [
+    "KRW-BTC",
+    "KRW-ETH"
+  ],
+  "count": 365
+}
