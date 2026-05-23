@@ -1,21 +1,26 @@
-import time
+import argparse
 import datetime
 import os
-import requests
+import time
+
 import pyupbit
+import requests
+
 
 # =========================================================
-# 업비트 자동매매 봇 (안정화 개선 버전)
-# - BTC / ETH 변동성 돌파 전략
-# - 중복 주문 방지
-# - API 오류 보호
-# - 텔레그램 알림
-# - 이동평균 필터 추가
-# - Rate Limit 최소화
+# Upbit auto trading bot
+# - BTC / ETH volatility breakout strategy
+# - Backtest mode
+# - Duplicate order guard
+# - Safer API/order handling
+# - Telegram notifications
+# - MA5 trend filter
+# - Reduced rate-limit pressure
 # =========================================================
+
 
 # =========================
-# 환경 변수
+# Environment variables
 # =========================
 ACCESS_KEY = os.environ.get("UPBIT_ACCESS_KEY", "").strip()
 SECRET_KEY = os.environ.get("UPBIT_SECRET_KEY", "").strip()
@@ -23,510 +28,275 @@ SECRET_KEY = os.environ.get("UPBIT_SECRET_KEY", "").strip()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-# =========================
-# 업비트 객체
-# =========================
-upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 설정
+# Settings
 # =========================
 TARGET_COINS = ["KRW-BTC", "KRW-ETH"]
 
-BUY_AMOUNT_KRW = 10000          # 코인당 매수 금액
-MIN_ORDER_KRW = 5000            # 업비트 최소 주문 금액
+BUY_AMOUNT_KRW = 10000
+MIN_ORDER_KRW = 5000
 
 DEFAULT_K = 0.5
-DEFAULT_PROFIT_TARGET = 0.01    # +1%
-DEFAULT_STOP_LOSS = -0.02       # -2%
+DEFAULT_PROFIT_TARGET = 0.01
+DEFAULT_STOP_LOSS = -0.02
 
-LOOP_INTERVAL = 3               # 루프 주기 (초)
+LOOP_INTERVAL = 3
+ORDER_COOLDOWN_SECONDS = 30
+BALANCE_MIN_VOLUME = 0.00001
+FEE_RATE = 0.0005
+
 
 # =========================
-# 상태 저장
+# State
 # =========================
 buy_prices = {}
 is_target_achieved = {}
 today_profit_targets = {}
 today_k_values = {}
+last_order_at = {}
 
 last_reset_date = None
+upbit = None
 
-for coin in TARGET_COINS:
-    buy_prices[coin] = 0
-    is_target_achieved[coin] = False
-    today_profit_targets[coin] = DEFAULT_PROFIT_TARGET
-    today_k_values[coin] = DEFAULT_K
+
+def init_state(tickers):
+    for ticker in tickers:
+        buy_prices[ticker] = 0
+        is_target_achieved[ticker] = False
+        today_profit_targets[ticker] = DEFAULT_PROFIT_TARGET
+        today_k_values[ticker] = DEFAULT_K
+        last_order_at[ticker] = datetime.datetime.min
+
 
 # =========================================================
-# 텔레그램
+# Telegram
 # =========================================================
 def send_telegram_msg(message):
     try:
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-            print("[텔레그램 미설정]")
+            print("[Telegram not configured]")
             return
 
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
-        }
-
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
         response = requests.post(url, json=payload, timeout=10)
 
         if response.status_code != 200:
-            print(f"[텔레그램 오류] {response.text}")
+            print(f"[Telegram error] {response.text}")
 
     except Exception as e:
-        print(f"[텔레그램 예외] {e}")
+        print(f"[Telegram exception] {e}")
+
 
 # =========================================================
-# 현재가 조회
+# API helpers
 # =========================================================
 def get_current_price(ticker):
     try:
         price = pyupbit.get_current_price(ticker)
-
-        if price is None:
-            return 0
-
-        return float(price)
-
+        return float(price) if price is not None else 0
     except Exception as e:
-        print(f"[현재가 조회 오류] {ticker} / {e}")
+        print(f"[Current price error] {ticker} / {e}")
         return 0
 
-# =========================================================
-# 시작 시간
-# =========================================================
+
 def get_start_time(ticker):
     try:
         df = pyupbit.get_ohlcv(ticker, interval="day", count=1)
+        if df is None or df.empty:
+            return None
         return df.index[0]
-
     except Exception as e:
-        print(f"[시작시간 오류] {ticker} / {e}")
+        print(f"[Start time error] {ticker} / {e}")
         return None
 
-# =========================================================
-# 잔고 조회
-# =========================================================
+
 def get_all_balances():
     try:
         balances = upbit.get_balances()
-
-        if isinstance(balances, list):
-            return balances
-
-        return []
-
+        return balances if isinstance(balances, list) else []
     except Exception as e:
-        print(f"[잔고 조회 오류] {e}")
+        print(f"[Balance error] {e}")
         return []
+
 
 def get_balance_from_cache(balances, currency):
     try:
-        for b in balances:
-            if b.get("currency") == currency:
-                return float(b.get("balance", 0))
-
+        for balance in balances:
+            if balance.get("currency") == currency:
+                return float(balance.get("balance", 0) or 0)
+        return 0
+    except Exception:
         return 0
 
-    except:
-        return 0
 
 def get_avg_buy_price_from_cache(balances, currency):
     try:
-        for b in balances:
-            if b.get("currency") == currency:
-                return float(b.get("avg_buy_price", 0))
-
+        for balance in balances:
+            if balance.get("currency") == currency:
+                return float(balance.get("avg_buy_price", 0) or 0)
+        return 0
+    except Exception:
         return 0
 
-    except:
-        return 0
 
-# =========================================================
-# 변동성 돌파 목표가 계산
-# =========================================================
-def get_target_price(ticker, k):
+def get_daily_market_data(ticker, k):
     try:
-        df = pyupbit.get_ohlcv(ticker, interval="day", count=2)
+        df = pyupbit.get_ohlcv(ticker, interval="day", count=6)
+        if df is None or len(df) < 6:
+            return None
 
-        today_open = df.iloc[-1]["open"]
+        today = df.iloc[-1]
+        yesterday = df.iloc[-2]
+        ma5 = df["close"].iloc[-6:-1].mean()
+        target_price = today["open"] + (yesterday["high"] - yesterday["low"]) * k
 
-        yesterday_high = df.iloc[0]["high"]
-        yesterday_low = df.iloc[0]["low"]
-
-        target_price = today_open + (yesterday_high - yesterday_low) * k
-
-        return (
-            float(target_price),
-            float(today_open),
-            float(yesterday_low)
-        )
-
+        return {
+            "target_price": float(target_price),
+            "today_open": float(today["open"]),
+            "prev_low": float(yesterday["low"]),
+            "ma5": float(ma5),
+            "yesterday_open": float(yesterday["open"]),
+            "yesterday_close": float(yesterday["close"]),
+        }
     except Exception as e:
-        print(f"[목표가 계산 오류] {ticker} / {e}")
-        return (0, 0, 0)
+        print(f"[Daily market data error] {ticker} / {e}")
+        return None
+
 
 # =========================================================
-# 이동평균 필터
+# Strategy policy
 # =========================================================
-def get_ma5(ticker):
+def set_policy_from_yesterday(ticker, yesterday_open, yesterday_close, notify=True):
     try:
-        df = pyupbit.get_ohlcv(ticker, interval="day", count=5)
+        if yesterday_open <= 0:
+            return
 
-        ma5 = df["close"].rolling(5).mean().iloc[-1]
-
-        return float(ma5)
-
-    except Exception as e:
-        print(f"[MA5 오류] {ticker} / {e}")
-        return 0
-
-# =========================================================
-# 시장 상태 분석
-# =========================================================
-def check_market_condition_and_set_policy(ticker):
-    try:
-        df = pyupbit.get_ohlcv(ticker, interval="day", count=2)
-
-        yesterday_open = df.iloc[0]["open"]
-        yesterday_close = df.iloc[0]["close"]
-
-        yesterday_return_pct = (
-            (yesterday_close - yesterday_open)
-            / yesterday_open
-        ) * 100
-
+        yesterday_return_pct = ((yesterday_close - yesterday_open) / yesterday_open) * 100
         coin_name = ticker.split("-")[-1]
 
-        # 불장
         if yesterday_return_pct >= 8:
             today_profit_targets[ticker] = 0.03
             today_k_values[ticker] = 0.5
-
             msg = (
-                f"🔥 [{coin_name}] 불장 모드\n"
-                f"전일 수익률: {yesterday_return_pct:.2f}%\n"
-                f"익절 목표: 3%"
+                f"[{coin_name}] bull mode\n"
+                f"Yesterday return: {yesterday_return_pct:.2f}%\n"
+                f"Take profit: 3%"
             )
-
-        # 약세장
         elif yesterday_return_pct <= -5:
             today_profit_targets[ticker] = 0.01
             today_k_values[ticker] = 0.7
-
             msg = (
-                f"❄️ [{coin_name}] 방어 모드\n"
-                f"전일 수익률: {yesterday_return_pct:.2f}%\n"
-                f"K값 강화: 0.7"
+                f"[{coin_name}] defense mode\n"
+                f"Yesterday return: {yesterday_return_pct:.2f}%\n"
+                f"K: 0.7"
             )
-
-        # 일반장
         else:
             today_profit_targets[ticker] = 0.01
             today_k_values[ticker] = 0.5
-
             msg = (
-                f"💤 [{coin_name}] 일반 모드\n"
-                f"전일 수익률: {yesterday_return_pct:.2f}%"
+                f"[{coin_name}] normal mode\n"
+                f"Yesterday return: {yesterday_return_pct:.2f}%"
             )
 
         print(msg)
-        send_telegram_msg(msg)
+        if notify:
+            send_telegram_msg(msg)
 
     except Exception as e:
-        print(f"[시장 분석 오류] {ticker} / {e}")
+        print(f"[Policy error] {ticker} / {e}")
+
+
+def is_order_cooldown_finished(ticker):
+    elapsed = datetime.datetime.now() - last_order_at[ticker]
+    return elapsed.total_seconds() >= ORDER_COOLDOWN_SECONDS
+
+
+def mark_order_time(ticker):
+    last_order_at[ticker] = datetime.datetime.now()
+
 
 # =========================================================
-# 시장가 매수
+# Order helpers
 # =========================================================
+def is_successful_order(result):
+    if not isinstance(result, dict):
+        return False
+    if result.get("error"):
+        return False
+    return bool(result.get("uuid"))
+
+
 def buy_coin(ticker, amount_krw):
     try:
-        result = upbit.buy_market_order(
-            ticker,
-            amount_krw * 0.9995
-        )
+        if amount_krw < MIN_ORDER_KRW:
+            return False
 
-        if result is not None:
+        result = upbit.buy_market_order(ticker, amount_krw * (1 - FEE_RATE))
+        if is_successful_order(result):
+            mark_order_time(ticker)
             return True
 
+        print(f"[Buy rejected] {ticker} / {result}")
         return False
-
     except Exception as e:
-        print(f"[매수 오류] {ticker} / {e}")
+        print(f"[Buy error] {ticker} / {e}")
         return False
 
-# =========================================================
-# 시장가 매도
-# =========================================================
+
 def sell_coin(ticker, volume):
     try:
-        result = upbit.sell_market_order(ticker, volume)
+        if volume <= BALANCE_MIN_VOLUME:
+            return False
 
-        if result is not None:
+        result = upbit.sell_market_order(ticker, volume)
+        if is_successful_order(result):
+            mark_order_time(ticker)
             return True
 
+        print(f"[Sell rejected] {ticker} / {result}")
+        return False
+    except Exception as e:
+        print(f"[Sell error] {ticker} / {e}")
         return False
 
-    except Exception as e:
-        print(f"[매도 오류] {ticker} / {e}")
-        return False
 
 # =========================================================
-# 시작 메시지
+# Live trading
 # =========================================================
-start_msg = (
-    "🤖 업비트 자동매매 봇 시작\n"
-    "전략: 변동성 돌파 + MA5 필터"
-)
+def run_live(tickers):
+    global last_reset_date, upbit
 
-print(start_msg)
-send_telegram_msg(start_msg)
+    if not ACCESS_KEY or not SECRET_KEY:
+        raise RuntimeError("UPBIT_ACCESS_KEY and UPBIT_SECRET_KEY are required for live mode.")
 
-# =========================================================
-# 메인 루프
-# =========================================================
-while True:
+    upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
+    init_state(tickers)
 
-    try:
+    start_msg = "Upbit auto trading bot started\nStrategy: volatility breakout + MA5 filter"
+    print(start_msg)
+    send_telegram_msg(start_msg)
 
-        now = datetime.datetime.now()
-
-        start_time = get_start_time("KRW-BTC")
-
-        if start_time is None:
-            time.sleep(LOOP_INTERVAL)
-            continue
-
-        end_time = start_time + datetime.timedelta(days=1)
-
-        # =================================================
-        # 하루 1회 초기화
-        # =================================================
-        today = now.date()
-
-        if last_reset_date != today:
-
-            last_reset_date = today
-
-            print("[일일 초기화 진행]")
-
-            for coin in TARGET_COINS:
-
-                is_target_achieved[coin] = False
-                buy_prices[coin] = 0
-
-                check_market_condition_and_set_policy(coin)
-
-            send_telegram_msg("📅 일일 전략 초기화 완료")
-
-        # =================================================
-        # 잔고 캐싱
-        # =================================================
-        balances = get_all_balances()
-
-        # =================================================
-        # 거래 시간
-        # =================================================
-        if start_time < now < end_time - datetime.timedelta(seconds=10):
-
-            for coin in TARGET_COINS:
-
-                currency = coin.split("-")[-1]
-
-                current_price = get_current_price(coin)
-
-                if current_price <= 0:
-                    continue
-
-                coin_balance = get_balance_from_cache(
-                    balances,
-                    currency
-                )
-
-                avg_buy_price = get_avg_buy_price_from_cache(
-                    balances,
-                    currency
-                )
-
-                target_price, today_open, prev_low = get_target_price(
-                    coin,
-                    today_k_values[coin]
-                )
-
-                ma5 = get_ma5(coin)
-
-                # =========================================
-                # 보유 중
-                # =========================================
-                if coin_balance > 0.00001:
-
-                    buy_prices[coin] = avg_buy_price
-
-                    profit_rate = (
-                        (current_price - avg_buy_price)
-                        / avg_buy_price
-                    )
-
-                    # 익절
-                    if profit_rate >= today_profit_targets[coin]:
-
-                        success = sell_coin(coin, coin_balance)
-
-                        if success:
-
-                            msg = (
-                                f"🎉 [{currency}] 익절 완료\n"
-                                f"수익률: {profit_rate*100:.2f}%\n"
-                                f"매도가: {current_price:,.0f}원"
-                            )
-
-                            print(msg)
-                            send_telegram_msg(msg)
-
-                            is_target_achieved[coin] = True
-                            buy_prices[coin] = 0
-
-                            time.sleep(1)
-                            continue
-
-                    # 손절
-                    elif profit_rate <= DEFAULT_STOP_LOSS:
-
-                        success = sell_coin(coin, coin_balance)
-
-                        if success:
-
-                            msg = (
-                                f"🚨 [{currency}] 손절 실행\n"
-                                f"손실률: {profit_rate*100:.2f}%\n"
-                                f"매도가: {current_price:,.0f}원"
-                            )
-
-                            print(msg)
-                            send_telegram_msg(msg)
-
-                            is_target_achieved[coin] = True
-                            buy_prices[coin] = 0
-
-                            time.sleep(1)
-                            continue
-
-                    # 전일 저점 이탈
-                    elif current_price < prev_low:
-
-                        success = sell_coin(coin, coin_balance)
-
-                        if success:
-
-                            msg = (
-                                f"⚠️ [{currency}] 전일 저점 붕괴\n"
-                                f"저점 기준: {prev_low:,.0f}원\n"
-                                f"현재가: {current_price:,.0f}원"
-                            )
-
-                            print(msg)
-                            send_telegram_msg(msg)
-
-                            is_target_achieved[coin] = True
-                            buy_prices[coin] = 0
-
-                            time.sleep(1)
-                            continue
-
-                # =========================================
-                # 미보유 상태 -> 매수 검사
-                # =========================================
-                else:
-
-                    if is_target_achieved[coin]:
-                        continue
-
-                    # MA5 위 + 돌파 성공
-                    if current_price > ma5 and current_price > target_price:
-
-                        krw_balance = get_balance_from_cache(
-                            balances,
-                            "KRW"
-                        )
-
-                        buy_amount = min(
-                            BUY_AMOUNT_KRW,
-                            krw_balance
-                        )
-
-                        if buy_amount >= MIN_ORDER_KRW:
-
-                            success = buy_coin(
-                                coin,
-                                buy_amount
-                            )
-
-                            if success:
-
-                                msg = (
-                                    f"🛒 [{currency}] 매수 완료\n"
-                                    f"현재가: {current_price:,.0f}원\n"
-                                    f"목표가 돌파 성공\n"
-                                    f"MA5 상단 유지"
-                                )
-
-                                print(msg)
-                                send_telegram_msg(msg)
-
-                                time.sleep(2)
-
-        # =================================================
-        # 장 종료 전 청산
-        # =================================================
-        else:
-
-            for coin in TARGET_COINS:
-
-                currency = coin.split("-")[-1]
-
-                coin_balance = get_balance_from_cache(
-                    balances,
-                    currency
-                )
-
-                if coin_balance > 0.00001:
-
-                    success = sell_coin(
-                        coin,
-                        coin_balance
-                    )
-
-                    if success:
-
-                        msg = (
-                            f"⏳ [{currency}] 장마감 청산 완료"
-                        )
-
-                        print(msg)
-                        send_telegram_msg(msg)
-
-                        time.sleep(1)
-
-        # =================================================
-        # 루프 대기
-        # =================================================
-        time.sleep(LOOP_INTERVAL)
-
-    except Exception as e:
-
-        error_msg = f"[메인 루프 오류] {e}"
-
-        print(error_msg)
-
+    while True:
         try:
-            send_telegram_msg(error_msg)
-        except:
-            pass
+            now = datetime.datetime.now()
+            start_time = get_start_time("KRW-BTC")
 
-        time.sleep(5)
+            if start_time is None:
+                time.sleep(LOOP_INTERVAL)
+                continue
+
+            end_time = start_time + datetime.timedelta(days=1)
+            today = now.date()
+
+            market_data_by_ticker = {}
+            for ticker in tickers:
+                market_data = get_daily_market_data(ticker, today_k_values.get(ticker, DEFAULT_K))
+                if market_data is not None:
+                    market_data_by_ticker[ticker] = market_data
+                time.sleep(0.12)
+
+            if last_reset_date != today:
+                last_reset_date = today
+                print("[Daily reset]")
