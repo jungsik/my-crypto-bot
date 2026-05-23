@@ -1,1 +1,48 @@
+name: Backtest Optimizer
 
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Backtest candle count"
+        required: true
+        default: "365"
+      tickers:
+        description: "Tickers separated by spaces"
+        required: true
+        default: "KRW-BTC KRW-ETH"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 저장소 코드 가져오기
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 필수 라이브러리 설치
+        run: pip install pyupbit requests
+
+      - name: RSI 거래량 조건 최적화
+        run: python backtest_optimizer.py --count "${{ inputs.count }}" --tickers ${{ inputs.tickers }} --write-config strategy_config.json
+
+      - name: 최적화 결과 자동 저장
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add strategy_config.json
+          git diff --staged --quiet || git commit -m "Update strategy config"
+          git push
