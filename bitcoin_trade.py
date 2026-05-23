@@ -7,19 +7,38 @@ import pyupbit
 import requests
 
 
+# =========================================================
+# GitHub Actions용 업비트 자동매매 봇
+# - 5분마다 1회 실행 후 종료
+# - BTC / ETH 기본 설정
+# - 변동성 돌파 + MA 추세 + RSI + 거래량 + 추격매수 방지
+# =========================================================
+
 ACCESS_KEY = os.environ.get("UPBIT_ACCESS_KEY", "").strip()
 SECRET_KEY = os.environ.get("UPBIT_SECRET_KEY", "").strip()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 TARGET_COINS = ["KRW-BTC", "KRW-ETH"]
+
 BUY_AMOUNT_KRW = 10000
 MIN_ORDER_KRW = 5000
+
 DEFAULT_K = 0.5
-DEFAULT_PROFIT_TARGET = 0.01
-DEFAULT_STOP_LOSS = -0.02
+DEFENSE_K = 0.7
+
+NORMAL_PROFIT_TARGET = 0.01
+BULL_PROFIT_TARGET = 0.03
+STOP_LOSS = -0.02
+
 FEE_RATE = 0.0005
 STATE_FILE = Path("bot_state.json")
+
+RSI_MIN = 50
+RSI_MAX = 75
+VOLUME_MULTIPLIER = 1.2
+MAX_CHASE_RATE = 0.01
+
 
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
@@ -27,29 +46,42 @@ upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 def send_telegram_msg(message):
     try:
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-            print("[텔레그램 미설정]", message)
+            print("[TELEGRAM SKIP]", message)
             return
+
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(
+        response = requests.post(
             url,
             json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
             timeout=10,
         )
+
+        if response.status_code != 200:
+            print("[TELEGRAM ERROR]", response.status_code, response.text)
+
     except Exception as e:
-        print(f"[텔레그램 오류] {e}")
+        print("[TELEGRAM EXCEPTION]", e)
 
 
 def load_state():
     if not STATE_FILE.exists():
         return {"last_reset_date": "", "sold_today": {}}
+
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        print("[STATE LOAD ERROR]", e)
         return {"last_reset_date": "", "sold_today": {}}
 
 
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        STATE_FILE.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print("[STATE SAVE ERROR]", e)
 
 
 def get_balances():
@@ -57,7 +89,7 @@ def get_balances():
         balances = upbit.get_balances()
         return balances if isinstance(balances, list) else []
     except Exception as e:
-        print(f"[잔고 조회 오류] {e}")
+        print("[BALANCE ERROR]", e)
         return []
 
 
@@ -80,51 +112,90 @@ def get_current_price(ticker):
         price = pyupbit.get_current_price(ticker)
         return float(price) if price else 0
     except Exception as e:
-        print(f"[현재가 오류] {ticker} / {e}")
+        print("[PRICE ERROR]", ticker, e)
         return 0
 
 
-def get_daily_data(ticker):
+def calculate_rsi(close_series, period=14):
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return float(rsi.iloc[-1])
+
+
+def get_market_data(ticker):
     try:
-        df = pyupbit.get_ohlcv(ticker, interval="day", count=6)
-        if df is None or len(df) < 6:
+        df = pyupbit.get_ohlcv(ticker, interval="day", count=30)
+
+        if df is None or len(df) < 21:
+            print("[DATA SKIP]", ticker, "not enough candle data")
             return None
 
         today = df.iloc[-1]
         yesterday = df.iloc[-2]
-        ma5 = df["close"].iloc[-6:-1].mean()
-        yesterday_return = (yesterday["close"] - yesterday["open"]) / yesterday["open"] * 100
+
+        close = df["close"]
+        volume = df["volume"]
+
+        ma5 = float(close.iloc[-6:-1].mean())
+        ma10 = float(close.iloc[-11:-1].mean())
+        ma20 = float(close.iloc[-21:-1].mean())
+        rsi = calculate_rsi(close.iloc[:-1], 14)
+        avg_volume5 = float(volume.iloc[-6:-1].mean())
+        today_volume = float(today["volume"])
+
+        yesterday_return = (
+            (yesterday["close"] - yesterday["open"]) / yesterday["open"]
+        ) * 100
 
         if yesterday_return >= 8:
-            profit_target, k_value, mode = 0.03, 0.5, "BULL"
+            mode = "BULL"
+            k_value = DEFAULT_K
+            profit_target = BULL_PROFIT_TARGET
         elif yesterday_return <= -5:
-            profit_target, k_value, mode = 0.01, 0.7, "DEFENSE"
+            mode = "DEFENSE"
+            k_value = DEFENSE_K
+            profit_target = NORMAL_PROFIT_TARGET
         else:
-            profit_target, k_value, mode = 0.01, 0.5, "NORMAL"
+            mode = "NORMAL"
+            k_value = DEFAULT_K
+            profit_target = NORMAL_PROFIT_TARGET
 
-        target_price = today["open"] + (yesterday["high"] - yesterday["low"]) * k_value
+        target_price = today["open"] + (
+            yesterday["high"] - yesterday["low"]
+        ) * k_value
 
         return {
+            "mode": mode,
             "today_open": float(today["open"]),
             "prev_low": float(yesterday["low"]),
-            "ma5": float(ma5),
             "target_price": float(target_price),
             "profit_target": profit_target,
-            "mode": mode,
-            "yesterday_return": yesterday_return,
+            "ma5": ma5,
+            "ma10": ma10,
+            "ma20": ma20,
+            "rsi": rsi,
+            "today_volume": today_volume,
+            "avg_volume5": avg_volume5,
+            "yesterday_return": float(yesterday_return),
         }
+
     except Exception as e:
-        print(f"[일봉 조회 오류] {ticker} / {e}")
+        print("[MARKET DATA ERROR]", ticker, e)
         return None
 
 
 def is_order_success(result):
     if not isinstance(result, dict):
-        print(f"[주문 응답 이상] {result}")
+        print("[ORDER RESPONSE ERROR]", result)
         return False
+
     if result.get("error"):
-        print(f"[주문 실패] {result}")
+        print("[ORDER FAILED]", result)
         return False
+
     return bool(result.get("uuid"))
 
 
@@ -133,7 +204,7 @@ def buy_coin(ticker, amount_krw):
         result = upbit.buy_market_order(ticker, amount_krw * (1 - FEE_RATE))
         return is_order_success(result)
     except Exception as e:
-        print(f"[매수 오류] {ticker} / {e}")
+        print("[BUY ERROR]", ticker, e)
         return False
 
 
@@ -142,78 +213,128 @@ def sell_coin(ticker, volume):
         result = upbit.sell_market_order(ticker, volume)
         return is_order_success(result)
     except Exception as e:
-        print(f"[매도 오류] {ticker} / {e}")
+        print("[SELL ERROR]", ticker, e)
         return False
+
+
+def should_buy(current_price, market):
+    breakout = current_price > market["target_price"]
+    uptrend = market["ma5"] > market["ma10"] > market["ma20"]
+    rsi_ok = RSI_MIN <= market["rsi"] <= RSI_MAX
+    volume_ok = market["today_volume"] > market["avg_volume5"] * VOLUME_MULTIPLIER
+    chase_ok = current_price < market["target_price"] * (1 + MAX_CHASE_RATE)
+
+    return {
+        "result": breakout and uptrend and rsi_ok and volume_ok and chase_ok,
+        "breakout": breakout,
+        "uptrend": uptrend,
+        "rsi_ok": rsi_ok,
+        "volume_ok": volume_ok,
+        "chase_ok": chase_ok,
+    }
+
+
+def get_sell_reason(current_price, avg_buy_price, market):
+    if avg_buy_price <= 0:
+        return "", 0
+
+    profit_rate = (current_price - avg_buy_price) / avg_buy_price
+
+    if profit_rate >= market["profit_target"]:
+        return f"TAKE PROFIT {profit_rate * 100:.2f}%", profit_rate
+
+    if profit_rate <= STOP_LOSS:
+        return f"STOP LOSS {profit_rate * 100:.2f}%", profit_rate
+
+    if current_price < market["prev_low"]:
+        return "BREAK PREVIOUS LOW", profit_rate
+
+    return "", profit_rate
+
+
+def print_market_log(currency, current_price, market, signal):
+    print(
+        f"[{currency}] mode={market['mode']} "
+        f"price={current_price:,.0f} "
+        f"target={market['target_price']:,.0f} "
+        f"ma5={market['ma5']:,.0f} "
+        f"ma10={market['ma10']:,.0f} "
+        f"ma20={market['ma20']:,.0f} "
+        f"rsi={market['rsi']:.1f} "
+        f"vol={market['today_volume']:.0f}/{market['avg_volume5']:.0f} "
+        f"signal={signal}"
+    )
 
 
 def main():
     if not ACCESS_KEY or not SECRET_KEY:
-        raise RuntimeError("GitHub Secrets에 UPBIT_ACCESS_KEY / UPBIT_SECRET_KEY를 등록하세요.")
-    send_telegram_msg("✅ GitHub Actions 자동매매 봇 실행 확인")
+        raise RuntimeError("Set UPBIT_ACCESS_KEY and UPBIT_SECRET_KEY in GitHub Secrets.")
+
     now = datetime.datetime.now()
     today = now.date().isoformat()
     state = load_state()
 
     if state.get("last_reset_date") != today:
         state = {"last_reset_date": today, "sold_today": {}}
-        send_telegram_msg("📅 일일 전략 초기화 완료")
+        send_telegram_msg("Daily strategy reset completed")
 
     balances = get_balances()
 
     for ticker in TARGET_COINS:
         currency = ticker.split("-")[-1]
-        market = get_daily_data(ticker)
+        market = get_market_data(ticker)
         current_price = get_current_price(ticker)
 
         if not market or current_price <= 0:
             continue
 
+        signal = should_buy(current_price, market)
+        print_market_log(currency, current_price, market, signal)
+
         coin_balance = get_balance(balances, currency)
         avg_buy_price = get_avg_buy_price(balances, currency)
 
-        print(
-            f"[{currency}] {market['mode']} / 현재가 {current_price:,.0f} / "
-            f"목표가 {market['target_price']:,.0f} / MA5 {market['ma5']:,.0f}"
-        )
-
         if coin_balance > 0.00001:
-            if avg_buy_price <= 0:
-                continue
-
-            profit_rate = (current_price - avg_buy_price) / avg_buy_price
-            sell_reason = ""
-
-            if profit_rate >= market["profit_target"]:
-                sell_reason = f"익절 {profit_rate * 100:.2f}%"
-            elif profit_rate <= DEFAULT_STOP_LOSS:
-                sell_reason = f"손절 {profit_rate * 100:.2f}%"
-            elif current_price < market["prev_low"]:
-                sell_reason = "전일 저점 이탈"
+            sell_reason, profit_rate = get_sell_reason(
+                current_price,
+                avg_buy_price,
+                market,
+            )
 
             if sell_reason and sell_coin(ticker, coin_balance):
                 state["sold_today"][ticker] = True
                 send_telegram_msg(
-                    f"✅ [{currency}] 매도 완료\n"
-                    f"사유: {sell_reason}\n"
-                    f"매도가: {current_price:,.0f}원"
+                    f"[{currency}] SELL DONE\n"
+                    f"reason: {sell_reason}\n"
+                    f"price: {current_price:,.0f} KRW\n"
+                    f"profit: {profit_rate * 100:.2f}%"
                 )
+
             continue
 
         if state["sold_today"].get(ticker):
-            print(f"[{currency}] 오늘 매도 완료 종목이라 재매수 스킵")
+            print(f"[{currency}] skip buy because it was sold today")
             continue
 
-        if current_price > market["target_price"] and current_price > market["ma5"]:
-            krw_balance = get_balance(balances, "KRW")
-            buy_amount = min(BUY_AMOUNT_KRW, krw_balance)
+        if not signal["result"]:
+            continue
 
-            if buy_amount >= MIN_ORDER_KRW and buy_coin(ticker, buy_amount):
-                send_telegram_msg(
-                    f"🛒 [{currency}] 매수 완료\n"
-                    f"현재가: {current_price:,.0f}원\n"
-                    f"목표가: {market['target_price']:,.0f}원\n"
-                    f"MA5: {market['ma5']:,.0f}원"
-                )
+        krw_balance = get_balance(balances, "KRW")
+        buy_amount = min(BUY_AMOUNT_KRW, krw_balance)
+
+        if buy_amount < MIN_ORDER_KRW:
+            print(f"[{currency}] skip buy because KRW balance is too low")
+            continue
+
+        if buy_coin(ticker, buy_amount):
+            send_telegram_msg(
+                f"[{currency}] BUY DONE\n"
+                f"price: {current_price:,.0f} KRW\n"
+                f"target: {market['target_price']:,.0f} KRW\n"
+                f"MA: {market['ma5']:,.0f} > {market['ma10']:,.0f} > {market['ma20']:,.0f}\n"
+                f"RSI: {market['rsi']:.1f}\n"
+                f"volume: {market['today_volume']:.0f} / avg5 {market['avg_volume5']:.0f}"
+            )
 
     save_state(state)
 
