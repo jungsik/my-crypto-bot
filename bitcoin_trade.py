@@ -149,7 +149,7 @@ def sell_coin(ticker, volume):
 def main():
     if not ACCESS_KEY or not SECRET_KEY:
         raise RuntimeError("GitHub Secrets에 UPBIT_ACCESS_KEY / UPBIT_SECRET_KEY를 등록하세요.")
-
+    send_telegram_msg("✅ GitHub Actions 자동매매 봇 실행 확인")
     now = datetime.datetime.now()
     today = now.date().isoformat()
     state = load_state()
