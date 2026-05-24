@@ -8,10 +8,10 @@ import requests
 
 
 # =========================================================
-# GitHub Actions용 업비트 자동매매 봇
+# VPS/cron용 업비트 단타 자동매매 봇
 # - 5분마다 1회 실행 후 종료
 # - BTC / ETH 기본 설정
-# - 변동성 돌파 + MA 추세 + RSI + 거래량 + 추격매수 방지
+# - 5분봉 돌파 + 단기 추세 + RSI + 거래량 + 추격매수 방지
 # =========================================================
 
 ACCESS_KEY = os.environ.get("UPBIT_ACCESS_KEY", "").strip()
@@ -27,21 +27,24 @@ MIN_ORDER_KRW = 5000
 DEFAULT_K = 0.5
 DEFENSE_K = 0.7
 
-NORMAL_PROFIT_TARGET = 0.01
-BULL_PROFIT_TARGET = 0.03
-STOP_LOSS = -0.02
-HARD_PROFIT_TARGET = 0.015
-TRAILING_START = 0.006
-TRAILING_DROP = 0.0045
+INTERVAL = "minute5"
+
+NORMAL_PROFIT_TARGET = 0.006
+BULL_PROFIT_TARGET = 0.009
+STOP_LOSS = -0.004
+HARD_PROFIT_TARGET = 0.009
+TRAILING_START = 0.0035
+TRAILING_DROP = 0.0025
+SELL_COOLDOWN_MINUTES = 20
 
 FEE_RATE = 0.0005
 STATE_FILE = Path("bot_state.json")
 STRATEGY_CONFIG_FILE = Path("strategy_config.json")
 
-RSI_MIN = 50
-RSI_MAX = 75
-VOLUME_MULTIPLIER = 1.2
-MAX_CHASE_RATE = 0.01
+RSI_MIN = 45
+RSI_MAX = 72
+VOLUME_MULTIPLIER = 1.1
+MAX_CHASE_RATE = 0.004
 
 
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
@@ -95,16 +98,27 @@ def send_telegram_msg(message):
 
 def load_state():
     if not STATE_FILE.exists():
-        return {"last_reset_date": "", "sold_today": {}, "highest_price": {}}
+        return {
+            "last_reset_date": "",
+            "sold_today": {},
+            "last_sell_at": {},
+            "highest_price": {},
+        }
 
     try:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         state.setdefault("sold_today", {})
+        state.setdefault("last_sell_at", {})
         state.setdefault("highest_price", {})
         return state
     except Exception as e:
         print("[STATE LOAD ERROR]", e)
-        return {"last_reset_date": "", "sold_today": {}, "highest_price": {}}
+        return {
+            "last_reset_date": "",
+            "sold_today": {},
+            "last_sell_at": {},
+            "highest_price": {},
+        }
 
 
 def save_state(state):
@@ -158,16 +172,31 @@ def calculate_rsi(close_series, period=14):
     return float(rsi.iloc[-1])
 
 
+def is_sell_cooldown(ticker, now, state):
+    last_sell_at = state.get("last_sell_at", {}).get(ticker)
+
+    if not last_sell_at:
+        return False
+
+    try:
+        last_sell_time = datetime.datetime.fromisoformat(last_sell_at)
+    except ValueError:
+        return False
+
+    elapsed = now - last_sell_time
+    return elapsed.total_seconds() < SELL_COOLDOWN_MINUTES * 60
+
+
 def get_market_data(ticker):
     try:
-        df = pyupbit.get_ohlcv(ticker, interval="day", count=30)
+        df = pyupbit.get_ohlcv(ticker, interval=INTERVAL, count=80)
 
-        if df is None or len(df) < 21:
+        if df is None or len(df) < 30:
             print("[DATA SKIP]", ticker, "not enough candle data")
             return None
 
-        today = df.iloc[-1]
-        yesterday = df.iloc[-2]
+        current_candle = df.iloc[-1]
+        prev_candle = df.iloc[-2]
 
         close = df["close"]
         volume = df["volume"]
@@ -177,33 +206,31 @@ def get_market_data(ticker):
         ma20 = float(close.iloc[-21:-1].mean())
         rsi = calculate_rsi(close.iloc[:-1], 14)
         avg_volume5 = float(volume.iloc[-6:-1].mean())
-        today_volume = float(today["volume"])
-
-        yesterday_return = (
-            (yesterday["close"] - yesterday["open"]) / yesterday["open"]
+        today_volume = float(current_candle["volume"])
+        recent_range = float(prev_candle["high"] - prev_candle["low"])
+        recent_return = (
+            (prev_candle["close"] - prev_candle["open"]) / prev_candle["open"]
         ) * 100
 
-        if yesterday_return >= 8:
-            mode = "BULL"
-            k_value = DEFAULT_K
+        if ma5 > ma10 and recent_return >= 0:
+            mode = "SCALP_UP"
             profit_target = BULL_PROFIT_TARGET
-        elif yesterday_return <= -5:
-            mode = "DEFENSE"
-            k_value = DEFENSE_K
+        elif ma5 > ma10:
+            mode = "SCALP"
             profit_target = NORMAL_PROFIT_TARGET
         else:
-            mode = "NORMAL"
-            k_value = DEFAULT_K
+            mode = "WAIT"
             profit_target = NORMAL_PROFIT_TARGET
 
-        target_price = today["open"] + (
-            yesterday["high"] - yesterday["low"]
-        ) * k_value
+        target_price = max(
+            float(prev_candle["high"]),
+            float(current_candle["open"] + recent_range * 0.25),
+        )
 
         return {
             "mode": mode,
-            "today_open": float(today["open"]),
-            "prev_low": float(yesterday["low"]),
+            "today_open": float(current_candle["open"]),
+            "prev_low": float(prev_candle["low"]),
             "target_price": float(target_price),
             "profit_target": profit_target,
             "ma5": ma5,
@@ -212,7 +239,7 @@ def get_market_data(ticker):
             "rsi": rsi,
             "today_volume": today_volume,
             "avg_volume5": avg_volume5,
-            "yesterday_return": float(yesterday_return),
+            "yesterday_return": float(recent_return),
         }
 
     except Exception as e:
@@ -252,7 +279,7 @@ def sell_coin(ticker, volume):
 
 def should_buy(current_price, market):
     breakout = current_price > market["target_price"]
-    uptrend = market["ma5"] > market["ma10"] > market["ma20"]
+    uptrend = market["ma5"] > market["ma10"] and current_price > market["ma20"]
     rsi_ok = RSI_MIN <= market["rsi"] <= RSI_MAX
     volume_ok = market["today_volume"] > market["avg_volume5"] * VOLUME_MULTIPLIER
     chase_ok = current_price < market["target_price"] * (1 + MAX_CHASE_RATE)
@@ -357,7 +384,12 @@ def main():
     state = load_state()
 
     if state.get("last_reset_date") != today:
-        state = {"last_reset_date": today, "sold_today": {}, "highest_price": {}}
+        state = {
+            "last_reset_date": today,
+            "sold_today": {},
+            "last_sell_at": {},
+            "highest_price": {},
+        }
         send_telegram_msg("Daily strategy reset completed")
 
     balances = get_balances()
@@ -406,6 +438,7 @@ def main():
 
             if sell_reason and sell_coin(ticker, coin_balance):
                 state["sold_today"][ticker] = True
+                state["last_sell_at"][ticker] = now.isoformat(timespec="seconds")
                 state["highest_price"].pop(ticker, None)
                 send_telegram_msg(
                     f"[{currency}] SELL DONE\n"
@@ -418,8 +451,8 @@ def main():
 
         state["highest_price"].pop(ticker, None)
 
-        if state["sold_today"].get(ticker):
-            print(f"[{currency}] skip buy because it was sold today")
+        if is_sell_cooldown(ticker, now, state):
+            print(f"[{currency}] skip buy because sell cooldown is active")
             continue
 
         if not signal["result"]:
