@@ -1,17 +1,12 @@
 {
-  "RSI_MIN": 50,
-  "RSI_MAX": 70,
-  "VOLUME_MULTIPLIER": 1.5,
-  "MAX_CHASE_RATE": 0.01,
-  "optimized_at": "2026-05-23T17:47:23Z",
+  "RSI_MIN": 45,
+  "RSI_MAX": 72,
+  "VOLUME_MULTIPLIER": 1.1,
+  "MAX_CHASE_RATE": 0.004,
+  "optimized_at": "manual-scalping",
   "tickers": [
     "KRW-BTC",
     "KRW-ETH"
   ],
-  "count": 365,
-  "score": 2.5839,
-  "avg_return_pct": -0.0195,
-  "avg_win_rate": 52.5,
-  "max_drawdown": -0.0539,
-  "trade_count": 9
+  "count": 365
 }
