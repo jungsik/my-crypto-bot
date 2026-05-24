@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -10,12 +11,6 @@ import requests
 
 # =========================================================
 # 업비트 멀티 레짐 자동매매 봇
-# - 추세장: 돌파 추종
-# - 횡보장: RSI 반등
-# - ATR 손절/익절
-# - ADX 추세강도 필터
-# - 볼린저밴드 전략
-# - 텔레그램 알림
 # =========================================================
 
 ACCESS_KEY = os.environ.get("UPBIT_ACCESS_KEY", "").strip()
@@ -23,6 +18,15 @@ SECRET_KEY = os.environ.get("UPBIT_SECRET_KEY", "").strip()
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+if not ACCESS_KEY or not SECRET_KEY:
+    raise RuntimeError(
+        "UPBIT_ACCESS_KEY / UPBIT_SECRET_KEY 환경변수 확인 필요"
+    )
+
+# =========================================================
+# 설정값
+# =========================================================
 
 TARGET_COINS = [
     "KRW-BTC",
@@ -45,7 +49,7 @@ RSI_MAX = 72
 VOLUME_MULTIPLIER = 1.3
 MAX_CHASE_RATE = 0.003
 
-ADX_MIN = 22
+ADX_MIN = 20
 
 ATR_STOP_MULTIPLIER = 1.3
 ATR_PROFIT_MULTIPLIER = 2.2
@@ -60,20 +64,32 @@ SIDEWAYS_RSI_BUY = 35
 
 STATE_FILE = Path("bot_state.json")
 
-upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
+# =========================================================
+# 업비트 연결
+# =========================================================
 
+upbit = pyupbit.Upbit(
+    ACCESS_KEY,
+    SECRET_KEY,
+)
 
 # =========================================================
 # 텔레그램
 # =========================================================
 
 def send_telegram(message):
+
     try:
+
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+            print("[TELEGRAM DISABLED]")
             print(message)
             return
 
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        url = (
+            f"https://api.telegram.org/bot"
+            f"{TELEGRAM_TOKEN}/sendMessage"
+        )
 
         requests.post(
             url,
@@ -93,23 +109,30 @@ def send_telegram(message):
 # =========================================================
 
 def load_state():
+
     if not STATE_FILE.exists():
+
         return {
             "highest_price": {},
         }
 
     try:
+
         return json.loads(
-            STATE_FILE.read_text(encoding="utf-8")
+            STATE_FILE.read_text(
+                encoding="utf-8"
+            )
         )
 
     except Exception:
+
         return {
             "highest_price": {},
         }
 
 
 def save_state(state):
+
     STATE_FILE.write_text(
         json.dumps(
             state,
@@ -121,31 +144,55 @@ def save_state(state):
 
 
 # =========================================================
-# 보조지표
+# RSI
 # =========================================================
 
 def calculate_rsi(close, period=14):
+
     delta = close.diff()
 
-    gain = delta.where(delta > 0, 0).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    gain = (
+        delta.where(delta > 0, 0)
+        .rolling(period)
+        .mean()
+    )
+
+    loss = (
+        (-delta.where(delta < 0, 0))
+        .rolling(period)
+        .mean()
+    )
 
     rs = gain / loss
 
     rsi = 100 - (100 / (1 + rs))
 
-    return float(rsi.iloc[-1])
+    value = float(rsi.iloc[-1])
 
+    if np.isnan(value):
+        return 50
+
+    return value
+
+
+# =========================================================
+# ATR
+# =========================================================
 
 def calculate_atr(df, period=14):
-    high_low = df["high"] - df["low"]
+
+    high_low = (
+        df["high"] - df["low"]
+    )
 
     high_close = np.abs(
-        df["high"] - df["close"].shift()
+        df["high"]
+        - df["close"].shift()
     )
 
     low_close = np.abs(
-        df["low"] - df["close"].shift()
+        df["low"]
+        - df["close"].shift()
     )
 
     tr = pd.concat(
@@ -159,24 +206,41 @@ def calculate_atr(df, period=14):
 
     atr = tr.rolling(period).mean()
 
-    return float(atr.iloc[-1])
+    value = float(atr.iloc[-1])
 
+    if np.isnan(value):
+        return 0
+
+    return value
+
+
+# =========================================================
+# ADX
+# =========================================================
 
 def calculate_adx(df, period=14):
+
     plus_dm = df["high"].diff()
-    minus_dm = df["low"].diff() * -1
+
+    minus_dm = (
+        df["low"].diff() * -1
+    )
 
     plus_dm[plus_dm < 0] = 0
     minus_dm[minus_dm < 0] = 0
 
-    tr1 = df["high"] - df["low"]
+    tr1 = (
+        df["high"] - df["low"]
+    )
 
     tr2 = (
-        df["high"] - df["close"].shift()
+        df["high"]
+        - df["close"].shift()
     ).abs()
 
     tr3 = (
-        df["low"] - df["close"].shift()
+        df["low"]
+        - df["close"].shift()
     ).abs()
 
     tr = pd.concat(
@@ -193,7 +257,9 @@ def calculate_adx(df, period=14):
     plus_di = (
         100
         * (
-            plus_dm.rolling(period).mean()
+            plus_dm
+            .rolling(period)
+            .mean()
             / atr
         )
     )
@@ -201,29 +267,60 @@ def calculate_adx(df, period=14):
     minus_di = (
         100
         * (
-            minus_dm.rolling(period).mean()
+            minus_dm
+            .rolling(period)
+            .mean()
             / atr
         )
     )
 
-    dx = (
-        (plus_di - minus_di).abs()
-        / (plus_di + minus_di)
-    ) * 100
+    di_sum = plus_di + minus_di
+
+    dx = np.where(
+        di_sum == 0,
+        0,
+        (
+            (plus_di - minus_di).abs()
+            / di_sum
+        ) * 100
+    )
+
+    dx = pd.Series(
+        dx,
+        index=df.index,
+    )
 
     adx = dx.rolling(period).mean()
 
-    return float(adx.iloc[-1])
+    value = float(adx.iloc[-1])
 
+    if np.isnan(value):
+        return 0
+
+    return value
+
+
+# =========================================================
+# 볼린저밴드
+# =========================================================
 
 def calculate_bollinger(
     close,
     period=20,
     std_dev=2,
 ):
-    ma = close.rolling(period).mean()
 
-    std = close.rolling(period).std()
+    ma = (
+        close
+        .rolling(period)
+        .mean()
+    )
+
+    std = (
+        close
+        .rolling(period)
+        .std()
+    )
 
     upper = ma + (std * std_dev)
 
@@ -241,7 +338,9 @@ def calculate_bollinger(
 # =========================================================
 
 def get_market_data(ticker):
+
     try:
+
         df = pyupbit.get_ohlcv(
             ticker,
             interval=INTERVAL,
@@ -268,7 +367,9 @@ def get_market_data(ticker):
             close.iloc[-21:-1].mean()
         )
 
-        rsi = calculate_rsi(close.iloc[:-1])
+        rsi = calculate_rsi(
+            close.iloc[:-1]
+        )
 
         adx = calculate_adx(df)
 
@@ -277,7 +378,9 @@ def get_market_data(ticker):
         bb = calculate_bollinger(close)
 
         avg_volume5 = float(
-            df["volume"].iloc[-6:-1].mean()
+            df["volume"]
+            .iloc[-6:-1]
+            .mean()
         )
 
         recent_return = (
@@ -288,17 +391,24 @@ def get_market_data(ticker):
             / prev["open"]
         ) * 100
 
+        # =====================================================
+        # 시장 모드 분류
+        # =====================================================
+
         if (
             adx >= ADX_MIN
             and ma5 > ma10
-            and recent_return >= 0
+            and recent_return >= -0.3
         ):
+
             mode = "TREND"
 
         elif adx < ADX_MIN:
+
             mode = "SIDEWAYS"
 
         else:
+
             mode = "DEFENSE"
 
         target_price = max(
@@ -316,26 +426,40 @@ def get_market_data(ticker):
         )
 
         return {
+
             "mode": mode,
+
             "target_price": target_price,
+
             "ma5": ma5,
             "ma10": ma10,
             "ma20": ma20,
+
             "rsi": rsi,
+
             "adx": adx,
+
             "atr": atr,
+
             "today_volume": float(
                 current["volume"]
             ),
+
             "avg_volume5": avg_volume5,
-            "prev_low": float(prev["low"]),
+
+            "prev_low": float(
+                prev["low"]
+            ),
+
             "bb_upper": bb["upper"],
             "bb_middle": bb["middle"],
             "bb_lower": bb["lower"],
         }
 
     except Exception as e:
+
         print("[MARKET ERROR]", ticker, e)
+
         return None
 
 
@@ -343,61 +467,104 @@ def get_market_data(ticker):
 # 매수 조건
 # =========================================================
 
-def should_buy(current_price, market):
+def should_buy(
+    ticker,
+    current_price,
+    market,
+):
 
-    if market["rsi"] >= 78:
+    try:
+
+        if market["rsi"] >= 78:
+            return False
+
+        # =====================================================
+        # TREND
+        # =====================================================
+
+        if market["mode"] == "TREND":
+
+            breakout = (
+                current_price
+                > market["target_price"]
+            )
+
+            uptrend = (
+                market["ma5"]
+                > market["ma10"]
+                and current_price
+                > market["ma20"]
+            )
+
+            volume_ok = (
+                market["today_volume"]
+                > market["avg_volume5"]
+                * VOLUME_MULTIPLIER
+            )
+
+            chase_ok = (
+                current_price
+                < market["target_price"]
+                * (
+                    1
+                    + MAX_CHASE_RATE
+                )
+            )
+
+            result = (
+                breakout
+                and uptrend
+                and volume_ok
+                and chase_ok
+            )
+
+            print(
+                f"[BUY CHECK] {ticker} "
+                f"breakout={breakout} "
+                f"uptrend={uptrend} "
+                f"volume={volume_ok} "
+                f"chase={chase_ok}"
+            )
+
+            return result
+
+        # =====================================================
+        # SIDEWAYS
+        # =====================================================
+
+        if market["mode"] == "SIDEWAYS":
+
+            near_lower = (
+                current_price
+                <= market["bb_lower"]
+                * 1.01
+            )
+
+            rsi_ok = (
+                market["rsi"]
+                <= SIDEWAYS_RSI_BUY
+            )
+
+            result = (
+                near_lower
+                and rsi_ok
+            )
+
+            print(
+                f"[SIDEWAYS CHECK] {ticker} "
+                f"near_lower={near_lower} "
+                f"rsi_ok={rsi_ok}"
+            )
+
+            return result
+
         return False
 
-    # 추세장
-    if market["mode"] == "TREND":
+    except Exception as e:
 
-        breakout = (
-            current_price
-            > market["target_price"]
-        )
+        print("[BUY CHECK ERROR]", e)
 
-        uptrend = (
-            market["ma5"]
-            > market["ma10"]
-            and current_price
-            > market["ma20"]
-        )
-
-        volume_ok = (
-            market["today_volume"]
-            > market["avg_volume5"]
-            * VOLUME_MULTIPLIER
-        )
-
-        chase_ok = (
-            current_price
-            < market["target_price"]
-            * (1 + MAX_CHASE_RATE)
-        )
-
-        return (
-            breakout
-            and uptrend
-            and volume_ok
-            and chase_ok
-        )
-
-    # 횡보장
-    if market["mode"] == "SIDEWAYS":
-
-        near_lower = (
-            current_price
-            <= market["bb_lower"] * 1.01
-        )
-
-        rsi_ok = (
-            market["rsi"]
-            <= SIDEWAYS_RSI_BUY
-        )
-
-        return near_lower and rsi_ok
-
-    return False
+        return False
 
 
 # =========================================================
@@ -412,64 +579,110 @@ def get_sell_signal(
     state,
 ):
 
-    if avg_buy_price <= 0:
+    try:
+
+        if avg_buy_price <= 0:
+            return False, ""
+
+        atr_stop = (
+            market["atr"]
+            * ATR_STOP_MULTIPLIER
+        )
+
+        atr_target = (
+            market["atr"]
+            * ATR_PROFIT_MULTIPLIER
+        )
+
+        highest = max(
+            state["highest_price"].get(
+                ticker,
+                0,
+            ),
+            current_price,
+        )
+
+        state["highest_price"][
+            ticker
+        ] = highest
+
+        trailing_drop = (
+            current_price
+            - highest
+        ) / highest
+
+        profit_rate = (
+            current_price
+            - avg_buy_price
+        ) / avg_buy_price
+
+        # =====================================================
+        # ATR 익절
+        # =====================================================
+
+        if (
+            current_price
+            >= avg_buy_price
+            + atr_target
+        ):
+
+            return (
+                True,
+                "ATR TAKE PROFIT",
+            )
+
+        # =====================================================
+        # ATR 손절
+        # =====================================================
+
+        if (
+            current_price
+            <= avg_buy_price
+            - atr_stop
+        ):
+
+            return (
+                True,
+                "ATR STOP LOSS",
+            )
+
+        # =====================================================
+        # 트레일링
+        # =====================================================
+
+        if (
+            profit_rate
+            >= TRAILING_START
+            and trailing_drop
+            <= -TRAILING_DROP
+        ):
+
+            return (
+                True,
+                "TRAILING STOP",
+            )
+
+        # =====================================================
+        # 저점 이탈
+        # =====================================================
+
+        if (
+            current_price
+            < market["prev_low"]
+        ):
+
+            return (
+                True,
+                "BREAK PREVIOUS LOW",
+            )
+
         return False, ""
 
-    atr_stop = (
-        market["atr"]
-        * ATR_STOP_MULTIPLIER
-    )
+    except Exception as e:
 
-    atr_target = (
-        market["atr"]
-        * ATR_PROFIT_MULTIPLIER
-    )
+        print("[SELL SIGNAL ERROR]", e)
 
-    highest = max(
-        state["highest_price"].get(
-            ticker,
-            0,
-        ),
-        current_price,
-    )
-
-    state["highest_price"][ticker] = highest
-
-    trailing_drop = (
-        current_price - highest
-    ) / highest
-
-    profit_rate = (
-        current_price
-        - avg_buy_price
-    ) / avg_buy_price
-
-    # ATR 익절
-    if (
-        current_price
-        >= avg_buy_price + atr_target
-    ):
-        return True, "ATR TAKE PROFIT"
-
-    # ATR 손절
-    if (
-        current_price
-        <= avg_buy_price - atr_stop
-    ):
-        return True, "ATR STOP LOSS"
-
-    # 트레일링
-    if (
-        profit_rate >= TRAILING_START
-        and trailing_drop <= -TRAILING_DROP
-    ):
-        return True, "TRAILING STOP"
-
-    # 전일 저점 이탈
-    if current_price < market["prev_low"]:
-        return True, "BREAK PREVIOUS LOW"
-
-    return False, ""
+        return False, ""
 
 
 # =========================================================
@@ -477,12 +690,18 @@ def get_sell_signal(
 # =========================================================
 
 def get_balance(currency):
+
     try:
+
         balances = upbit.get_balances()
 
         for item in balances:
 
-            if item["currency"] == currency:
+            if (
+                item["currency"]
+                == currency
+            ):
+
                 return float(
                     item["balance"]
                     or 0
@@ -491,17 +710,25 @@ def get_balance(currency):
         return 0
 
     except Exception as e:
+
         print("[BALANCE ERROR]", e)
+
         return 0
 
 
 def get_avg_buy_price(currency):
+
     try:
+
         balances = upbit.get_balances()
 
         for item in balances:
 
-            if item["currency"] == currency:
+            if (
+                item["currency"]
+                == currency
+            ):
+
                 return float(
                     item["avg_buy_price"]
                     or 0
@@ -510,38 +737,79 @@ def get_avg_buy_price(currency):
         return 0
 
     except Exception:
+
         return 0
 
 
 # =========================================================
-# 주문
+# 매수
 # =========================================================
 
-def buy_coin(ticker, amount):
+def buy_coin(
+    ticker,
+    amount,
+):
+
     try:
+
         result = upbit.buy_market_order(
             ticker,
-            amount * (1 - FEE_RATE),
+            amount
+            * (
+                1
+                - FEE_RATE
+            ),
         )
 
-        return bool(result.get("uuid"))
+        success = bool(
+            result.get("uuid")
+        )
+
+        print(
+            "[BUY RESULT]",
+            result,
+        )
+
+        return success
 
     except Exception as e:
+
         print("[BUY ERROR]", e)
+
         return False
 
 
-def sell_coin(ticker, volume):
+# =========================================================
+# 매도
+# =========================================================
+
+def sell_coin(
+    ticker,
+    volume,
+):
+
     try:
+
         result = upbit.sell_market_order(
             ticker,
             volume,
         )
 
-        return bool(result.get("uuid"))
+        success = bool(
+            result.get("uuid")
+        )
+
+        print(
+            "[SELL RESULT]",
+            result,
+        )
+
+        return success
 
     except Exception as e:
+
         print("[SELL ERROR]", e)
+
         return False
 
 
@@ -551,116 +819,175 @@ def sell_coin(ticker, volume):
 
 def main():
 
+    print(
+        "\n=============================="
+    )
+
+    print(
+        "[START]",
+        datetime.datetime.now()
+    )
+
     state = load_state()
 
     for ticker in TARGET_COINS:
 
-        currency = ticker.split("-")[-1]
+        try:
 
-        market = get_market_data(ticker)
+            currency = (
+                ticker.split("-")[-1]
+            )
 
-        if not market:
-            continue
+            market = get_market_data(
+                ticker
+            )
 
-        current_price = pyupbit.get_current_price(
-            ticker
-        )
+            if not market:
+                continue
 
-        if not current_price:
-            continue
+            current_price = (
+                pyupbit.get_current_price(
+                    ticker
+                )
+            )
 
-        print(
-            f"[{currency}] "
-            f"mode={market['mode']} "
-            f"price={current_price:,.0f} "
-            f"RSI={market['rsi']:.1f} "
-            f"ADX={market['adx']:.1f}"
-        )
+            if not current_price:
+                continue
 
-        coin_balance = get_balance(currency)
+            print(
+                f"[{currency}] "
+                f"mode={market['mode']} "
+                f"price={current_price:,.0f} "
+                f"RSI={market['rsi']:.1f} "
+                f"ADX={market['adx']:.1f}"
+            )
 
-        holding = coin_balance > 0.00001
-
-        # =========================
-        # 매도
-        # =========================
-
-        if holding:
-
-            avg_buy_price = get_avg_buy_price(
+            coin_balance = get_balance(
                 currency
             )
 
-            should_sell, reason = (
-                get_sell_signal(
-                    ticker,
-                    current_price,
-                    avg_buy_price,
-                    market,
-                    state,
-                )
+            holding = (
+                coin_balance > 0.00001
             )
 
-            if should_sell:
+            # =================================================
+            # 매도
+            # =================================================
 
-                success = sell_coin(
-                    ticker,
-                    coin_balance,
+            if holding:
+
+                avg_buy_price = (
+                    get_avg_buy_price(
+                        currency
+                    )
                 )
 
-                if success:
-
-                    send_telegram(
-                        f"[SELL] {currency}\n"
-                        f"reason: {reason}\n"
-                        f"price: {current_price:,.0f}"
-                    )
-
-                    state["highest_price"].pop(
+                should_sell, reason = (
+                    get_sell_signal(
                         ticker,
-                        None,
+                        current_price,
+                        avg_buy_price,
+                        market,
+                        state,
+                    )
+                )
+
+                if should_sell:
+
+                    print(
+                        f"[SELL SIGNAL] "
+                        f"{ticker} "
+                        f"{reason}"
                     )
 
-            continue
+                    success = sell_coin(
+                        ticker,
+                        coin_balance,
+                    )
 
-        # =========================
-        # 매수
-        # =========================
+                    if success:
 
-        if not should_buy(
-            current_price,
-            market,
-        ):
-            continue
+                        send_telegram(
+                            f"[SELL] {currency}\n"
+                            f"reason: {reason}\n"
+                            f"price: {current_price:,.0f}"
+                        )
 
-        krw = get_balance("KRW")
+                        state[
+                            "highest_price"
+                        ].pop(
+                            ticker,
+                            None,
+                        )
 
-        buy_amount = min(
-            BUY_AMOUNT_KRW,
-            krw,
-        )
+                continue
 
-        if buy_amount < MIN_ORDER_KRW:
-            continue
+            # =================================================
+            # 매수
+            # =================================================
 
-        success = buy_coin(
-            ticker,
-            buy_amount,
-        )
+            can_buy = should_buy(
+                ticker,
+                current_price,
+                market,
+            )
 
-        if success:
+            if not can_buy:
+                continue
 
-            send_telegram(
-                f"[BUY] {currency}\n"
-                f"mode: {market['mode']}\n"
-                f"price: {current_price:,.0f}\n"
-                f"RSI: {market['rsi']:.1f}\n"
-                f"ADX: {market['adx']:.1f}"
+            krw = get_balance("KRW")
+
+            buy_amount = min(
+                BUY_AMOUNT_KRW,
+                krw,
+            )
+
+            if (
+                buy_amount
+                < MIN_ORDER_KRW
+            ):
+
+                continue
+
+            print(
+                f"[BUY SIGNAL] "
+                f"{ticker}"
+            )
+
+            success = buy_coin(
+                ticker,
+                buy_amount,
+            )
+
+            if success:
+
+                send_telegram(
+                    f"[BUY] {currency}\n"
+                    f"mode: {market['mode']}\n"
+                    f"price: {current_price:,.0f}\n"
+                    f"RSI: {market['rsi']:.1f}\n"
+                    f"ADX: {market['adx']:.1f}"
+                )
+
+            time.sleep(0.2)
+
+        except Exception as e:
+
+            print(
+                "[MAIN LOOP ERROR]",
+                ticker,
+                e,
             )
 
     save_state(state)
 
+    print("[END]")
+
+
+# =========================================================
+# 실행
+# =========================================================
 
 if __name__ == "__main__":
+
     main()
-    
