@@ -48,9 +48,14 @@ class StrategyConfig:
     max_buy_per_day: int = 4
     min_krw_reserve: float = 20_000
 
+    # performance guard (일일 손실·연속 손절)
+    performance_guard_enabled: bool = True
+    daily_loss_limit_pct: float = -2.0
+    max_consecutive_losses: int = 3
+
     # backtest
     fill_model: str = "conservative"
-    backtest_version: str = "multi-regime-v3"
+    backtest_version: str = "multi-regime-v4"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "StrategyConfig":
@@ -78,6 +83,9 @@ class StrategyConfig:
             "MAX_BUY_PER_RUN": "max_buy_per_run",
             "MAX_BUY_PER_DAY": "max_buy_per_day",
             "MIN_KRW_RESERVE": "min_krw_reserve",
+            "PERFORMANCE_GUARD_ENABLED": "performance_guard_enabled",
+            "DAILY_LOSS_LIMIT_PCT": "daily_loss_limit_pct",
+            "MAX_CONSECUTIVE_LOSSES": "max_consecutive_losses",
             "FILL_MODEL": "fill_model",
             "BACKTEST_VERSION": "backtest_version",
         }
@@ -120,6 +128,9 @@ class StrategyConfig:
             "MAX_BUY_PER_RUN": self.max_buy_per_run,
             "MAX_BUY_PER_DAY": self.max_buy_per_day,
             "MIN_KRW_RESERVE": self.min_krw_reserve,
+            "PERFORMANCE_GUARD_ENABLED": self.performance_guard_enabled,
+            "DAILY_LOSS_LIMIT_PCT": self.daily_loss_limit_pct,
+            "MAX_CONSECUTIVE_LOSSES": self.max_consecutive_losses,
             "FILL_MODEL": self.fill_model,
             "BACKTEST_VERSION": self.backtest_version,
             "tickers": self.target_coins,
