@@ -1,25 +1,41 @@
 {
+  "TARGET_COINS": [
+    "KRW-BTC",
+    "KRW-ETH",
+    "KRW-SOL",
+    "KRW-XRP",
+    "KRW-DOGE"
+  ],
+  "POSITION_PRIORITY": [
+    "KRW-BTC",
+    "KRW-ETH",
+    "KRW-SOL",
+    "KRW-XRP",
+    "KRW-DOGE"
+  ],
+  "INTERVAL": "minute15",
+  "BUY_AMOUNT_KRW": 10000,
+  "MIN_ORDER_KRW": 5000,
+  "FEE_RATE": 0.0005,
   "RSI_MIN": 48,
   "RSI_MAX": 72,
-
   "VOLUME_MULTIPLIER": 1.3,
   "MAX_CHASE_RATE": 0.003,
-
   "ADX_MIN": 22,
-
   "ATR_STOP_MULTIPLIER": 1.3,
   "ATR_PROFIT_MULTIPLIER": 2.2,
-
   "TRAILING_START": 0.004,
   "TRAILING_DROP": 0.0025,
-
   "SIDEWAYS_RSI_BUY": 35,
-
   "BBANDS_PERIOD": 20,
   "BBANDS_STD": 2,
-
-  "optimized_at": "multi-regime-v2",
-
+  "MAX_OPEN_POSITIONS": 2,
+  "MAX_BUY_PER_RUN": 1,
+  "MAX_BUY_PER_DAY": 4,
+  "MIN_KRW_RESERVE": 20000,
+  "FILL_MODEL": "conservative",
+  "BACKTEST_VERSION": "multi-regime-v3",
+  "optimized_at": "multi-regime-v3",
   "tickers": [
     "KRW-BTC",
     "KRW-ETH",
@@ -27,6 +43,5 @@
     "KRW-XRP",
     "KRW-DOGE"
   ],
-
-  "count": 365
+  "count": 8640
 }

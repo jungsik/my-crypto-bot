@@ -34,7 +34,7 @@ jobs:
           cache: pip
 
       - name: 필수 라이브러리 설치
-        run: pip install pyupbit requests
+        run: pip install -r requirements.txt
 
       - name: RSI 거래량 조건 최적화
         run: python backtest_optimizer.py --count "${{ inputs.count }}" --tickers ${{ inputs.tickers }} --write-config strategy_config.json
